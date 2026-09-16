@@ -32,6 +32,20 @@ bool AqaraFP2Accel::i2c_init_bus() {
 
   ESP_LOGI(TAG, "I2C bus initialized successfully");
   i2c_initialized_ = true;
+
+  // One-off bus scan: the FP2 has at least one more I2C device (the ambient
+  // light sensor) on this bus that is not driven yet.  Log what answers.
+  for (uint8_t addr = 0x08; addr < 0x78; addr++) {
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (addr << 1) | I2C_MASTER_WRITE, true);
+    i2c_master_stop(cmd);
+    esp_err_t r = i2c_master_cmd_begin(i2c_port_, cmd, pdMS_TO_TICKS(20));
+    i2c_cmd_link_delete(cmd);
+    if (r == ESP_OK) {
+      ESP_LOGI(TAG, "I2C scan: device found at 0x%02X", addr);
+    }
+  }
   return true;
 }
 
@@ -47,6 +61,9 @@ void AqaraFP2Accel::setup() {
 
   // Initialize the accelerometer
   i2c_init_acc();
+
+  // Initialize the ambient light sensor
+  lux_init_();
 
   // Create mutex for thread-safe access
   mutex_ = xSemaphoreCreateMutex();
@@ -88,12 +105,77 @@ void AqaraFP2Accel::task_loop_() {
     // Read and process accelerometer data
     read_process_accel();
 
+    // Ambient light: the OPT3001 converts every 800 ms, poll at 1 Hz
+    if (lux_present_ && millis() - lux_last_read_ms_ >= 1000) {
+      lux_last_read_ms_ = millis();
+      lux_read_();
+    }
+
     // Delay for the configured interval
     vTaskDelay(pdMS_TO_TICKS(update_interval_ms_));
   }
 
   ESP_LOGI(TAG, "Accelerometer task stopped");
   vTaskDelete(nullptr);
+}
+
+// Main-thread loop: publish values produced by the task
+void AqaraFP2Accel::loop() {
+  if (!lux_dirty_ || illuminance_sensor_ == nullptr || mutex_ == nullptr) return;
+  xSemaphoreTake(mutex_, portMAX_DELAY);
+  float v = lux_value_;
+  lux_dirty_ = false;
+  xSemaphoreGive(mutex_);
+  illuminance_sensor_->publish_state(v);
+}
+
+// ---- OPT3001 ambient light sensor -------------------------------------
+static const uint8_t LUX_SENSOR_ADDR = 0x44;
+
+bool AqaraFP2Accel::lux_read_reg16_(uint8_t reg, uint16_t *value) {
+  uint8_t data[2];
+  esp_err_t err = i2c_master_write_read_device(i2c_port_, LUX_SENSOR_ADDR, &reg, 1, data, 2, pdMS_TO_TICKS(100));
+  if (err != ESP_OK) return false;
+  *value = (uint16_t)((data[0] << 8) | data[1]);
+  return true;
+}
+
+bool AqaraFP2Accel::lux_write_reg16_(uint8_t reg, uint16_t value) {
+  uint8_t buf[3] = {reg, (uint8_t)(value >> 8), (uint8_t)(value & 0xFF)};
+  return i2c_master_write_to_device(i2c_port_, LUX_SENSOR_ADDR, buf, 3, pdMS_TO_TICKS(100)) == ESP_OK;
+}
+
+void AqaraFP2Accel::lux_init_() {
+  uint16_t mfg = 0, dev = 0;
+  if (!lux_read_reg16_(0x7E, &mfg)) {
+    ESP_LOGI(TAG, "No light sensor answered at 0x%02X", LUX_SENSOR_ADDR);
+    return;
+  }
+  lux_read_reg16_(0x7F, &dev);
+  ESP_LOGI(TAG, "Light sensor at 0x%02X: manufacturer 0x%04X device 0x%04X", LUX_SENSOR_ADDR, mfg, dev);
+  if (mfg != 0x5449) {  // "TI"
+    ESP_LOGW(TAG, "Light sensor is not an OPT3001 (expected mfg 0x5449); not driving it");
+    return;
+  }
+  // Config: automatic full-scale range, 800 ms conversion, continuous mode
+  if (!lux_write_reg16_(0x01, 0xCE10)) {
+    ESP_LOGW(TAG, "Failed to configure OPT3001");
+    return;
+  }
+  lux_present_ = true;
+  ESP_LOGI(TAG, "OPT3001 ambient light sensor enabled");
+}
+
+void AqaraFP2Accel::lux_read_() {
+  uint16_t raw;
+  if (!lux_read_reg16_(0x00, &raw)) return;
+  // lux = 0.01 * 2^E * R   (E = bits 15..12, R = bits 11..0)
+  float lux = 0.01f * (float)(1 << (raw >> 12)) * (float)(raw & 0x0FFF);
+  if (mutex_ == nullptr) return;
+  xSemaphoreTake(mutex_, portMAX_DELAY);
+  lux_value_ = lux;
+  lux_dirty_ = true;
+  xSemaphoreGive(mutex_);
 }
 
 // Thread-safe public accessors

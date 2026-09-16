@@ -1,6 +1,7 @@
 #pragma once
 
 #include "esphome/core/component.h"
+#include "esphome/components/sensor/sensor.h"
 #include <cstdint>
 #include <array>
 #include <freertos/FreeRTOS.h>
@@ -67,8 +68,11 @@ struct AccelState {
 class AqaraFP2Accel : public Component {
  public:
   void setup() override;
-  void loop() override {}
+  void loop() override;
   void dump_config() override;
+
+  // Ambient light sensor (TI OPT3001 at 0x44 on the same bus)
+  void set_illuminance_sensor(sensor::Sensor *s) { illuminance_sensor_ = s; }
 
   float get_setup_priority() const override { return setup_priority::BUS; }
 
@@ -91,6 +95,17 @@ class AqaraFP2Accel : public Component {
   bool i2c_read_accel_xyz(int16_t *x, int16_t *y, int16_t *z);
   bool i2c_write_reg(uint8_t reg, uint8_t value);
   void i2c_init_acc();
+
+  // OPT3001 ambient light sensor
+  bool lux_read_reg16_(uint8_t reg, uint16_t *value);
+  bool lux_write_reg16_(uint8_t reg, uint16_t value);
+  void lux_init_();
+  void lux_read_();
+  bool lux_present_{false};
+  float lux_value_{NAN};
+  bool lux_dirty_{false};
+  uint32_t lux_last_read_ms_{0};
+  sensor::Sensor *illuminance_sensor_{nullptr};
 
   // Data processing
   void read_process_accel();
