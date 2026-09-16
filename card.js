@@ -344,13 +344,14 @@ class AqaraFP2Card extends HTMLElement {
   }
 
   // Raw radar coordinates -> full-grid cell coordinates (float). +X is the
-  // viewer's left (sensor at the top looking down the canvas).
+  // viewer's left (sensor at the top looking down the canvas). Wall mode
+  // units are 2.5 cm (measured: 1 m ~ 40), i.e. 20 units per 0.5 m cell.
   toGrid(x, y) {
     if (this.data.corner) return { gc: 2 + ((-x + 400) / 800) * 14, gr: (y / 800) * 14 };
-    return { gc: 8 - x / 50, gr: y / 50 };
+    return { gc: 8 - x / 20, gr: y / 20 };
   }
   sensorCell() { return this.data.corner ? (this.data.mounting === "right_corner" ? { gc: 16, gr: 0 } : { gc: 2, gr: 0 }) : { gc: 8, gr: 0 }; }
-  toMeters(x, y) { return { x: x / 100, y: y / 100 }; }
+  toMeters(x, y) { return this.data.corner ? { x: x / 100, y: y / 100 } : { x: x / 40, y: y / 40 }; }
 
   // ---------------------------------------------------------------- canvas
   render() {
@@ -482,7 +483,7 @@ class AqaraFP2Card extends HTMLElement {
       if (this.config.show_velocity && t.velocity) {
         const s = this.sensorCell();
         const dx = g.gc - s.gc, dy = g.gr - s.gr, len = Math.hypot(dx, dy) || 1;
-        const mag = Math.max(-3, Math.min(3, t.velocity / 60)) * cell;
+        const mag = Math.max(-3, Math.min(3, t.velocity / 25)) * cell;
         const ex = px + (dx / len) * mag, ey = py + (dy / len) * mag;
         ctx.strokeStyle = `rgb(${col})`; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(ex, ey); ctx.stroke();
       }
@@ -604,7 +605,7 @@ class AqaraFP2Card extends HTMLElement {
     tt.innerHTML = d.targets.map((t) => {
       const m = this.toMeters(t.x, t.y);
       const post = { 0: "moving", 1: "sitting", 2: "lying", 255: "-" }[t.posture] ?? t.posture;
-      return `<tr><td>#${t.id}</td><td>${m.x >= 0 ? "+" : ""}${m.x.toFixed(2)}, ${m.y.toFixed(2)} m</td><td>${(t.velocity / 100).toFixed(2)} m/s</td><td>${post}</td><td>${t.snr}</td></tr>`;
+      return `<tr><td>#${t.id}</td><td>${m.x >= 0 ? "+" : ""}${m.x.toFixed(2)}, ${m.y.toFixed(2)} m</td><td>${(t.velocity / (this.data.corner ? 100 : 40)).toFixed(2)} m/s</td><td>${post}</td><td>${t.snr}</td></tr>`;
     }).join("");
   }
 

@@ -973,9 +973,10 @@ bool FP2Component::zone_contains_(const FP2Zone *zone, int16_t x, int16_t y) con
     col = 2 + (int) ((-(float) x + 400.0f) / 800.0f * 14.0f);
     row = (int) ((float) y / 800.0f * 14.0f);
   } else {
-    // wall: full 16x20 grid, sensor at column 8 / row 0, 50 cm cells, +X = left
-    col = 8 - (int) floorf((float) x / 50.0f) - 1;
-    row = (int) ((float) y / 50.0f);
+    // wall: full 16x20 grid, sensor at column 8 / row 0, 50 cm cells of 20
+    // units (2.5 cm per unit, measured), +X = left
+    col = 8 - (int) floorf((float) x / 20.0f) - 1;
+    row = (int) ((float) y / 20.0f);
   }
   if (col < 0 || col > 15 || row < 0 || row > 19) return false;
   uint16_t bits = (zone->grid[row * 2] << 8) | zone->grid[row * 2 + 1];

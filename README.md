@@ -85,7 +85,7 @@ exclude and entry/exit maps set from the card are stored on the device
 
 ### Grid Configuration
 
-Grids are the radar's 20×16 map (8 m × 10 m, 0.5 m cells) in wall mode; corner modes use the 14×14 view (a 14-row grid in YAML is placed at columns 2-15):
+Grids are the radar's 20×16 map (8 m × 10 m, 0.5 m cells) in wall mode; corner modes use the 14×14 view (a 14-row grid in YAML is placed at columns 2-15). The cell size is fixed by the radar protocol. Target coordinates are ~2.5 cm per unit in wall mode (rough measurement):
 - `.` = Active detection cell
 - `X` = Zone coverage
 - Grids available: `interference_grid`, `exit_grid`, `edge_label_grid`
