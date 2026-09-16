@@ -71,7 +71,7 @@ See [example_config.yaml](example_config.yaml) for a complete working configurat
 | `people_counting` | `true` | Enable people count reports |
 | `fall_detection` | `false` | With `fall_detection_sensitivity` |
 | `derive_presence` | `true` | Derive presence/motion/zone occupancy from targets when the radar sends no events (`absence_timeout`: 30s). Targets in exclude or interference cells are ignored; the radar itself keeps streaming them. |
-| `presence_event`, `people_count` | – | Text / numeric sensors |
+| `presence_event`, `people_count` | – | Text / numeric sensors (`people_count` counts valid targets when `derive_presence` is on; the radar's own count includes ghosts in excluded / off-grid cells) |
 | `zones[].presence_sensitivity` | `medium` | Per-zone sensitivity |
 | `zones[].event` | – | Text sensor: `enter` / `move` / `exit` |
 | `*_select`, `*_switch` | – | HA entities for each setting, e.g. `mounting_position_select`, `sensitivity_select`, `ai_person_detection_switch` (see example) |

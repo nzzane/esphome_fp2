@@ -824,7 +824,9 @@ void FP2Component::handle_report_(AttrId attr_id, const std::vector<uint8_t> &pa
     case AttrId::REALTIME_PEOPLE_NUMBER:
       if (is_u32) {
         ESP_LOGD(TAG, "Realtime people number: %u", u32);
-        if (people_count_sensor_ != nullptr)
+        // With derived presence the count comes from the valid targets instead:
+        // the radar's number includes targets in excluded / off-grid cells.
+        if (people_count_sensor_ != nullptr && !derive_presence_)
           people_count_sensor_->publish_state(u32);
       }
       break;
@@ -1027,6 +1029,8 @@ void FP2Component::update_derived_states_(const std::vector<uint8_t> &payload, u
     for (size_t z = 0; z < zones_.size(); z++)
       if (!zone_hit[z] && !zones_[z]->is_empty() && zone_contains_(zones_[z], x, y)) zone_hit[z] = true;
   }
+  if (people_count_sensor_ != nullptr && (!people_count_sensor_->has_state() || (int) people_count_sensor_->state != valid))
+    people_count_sensor_->publish_state(valid);
   if (valid > 0) {
     last_target_seen_ms_ = now;
     if (!radar_presence_seen_) {
@@ -1056,6 +1060,7 @@ void FP2Component::check_derived_absence_() {
   if (!radar_presence_seen_ && last_target_seen_ms_ != 0 && now - last_target_seen_ms_ > absence_timeout_ms_) {
     if (global_presence_sensor_ != nullptr && global_presence_sensor_->state) global_presence_sensor_->publish_state(false);
     if (global_motion_sensor_ != nullptr && global_motion_sensor_->state) global_motion_sensor_->publish_state(false);
+    if (people_count_sensor_ != nullptr && people_count_sensor_->state != 0) people_count_sensor_->publish_state(0);
   }
   if (!radar_zone_seen_) {
     for (size_t z = 0; z < zones_.size() && z < zone_last_seen_ms_.size(); z++) {
