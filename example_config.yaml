@@ -1,6 +1,9 @@
 esphome:
   name: test-fp2
 
+# NOTE: do NOT add a `psram:` block for this device even though the module has
+# 2 MB PSRAM - ESP-IDF rejects the chip's eFuse package id and the device
+# boot-loops.  See FLASHING.md.
 esp32:
   board: esp32-solo1
   framework:
@@ -34,6 +37,31 @@ api:
         - api.respond:
             data: !lambda |-
               id(fp2).json_get_map_data(root);
+    # Zone editing from the card
+    - action: set_zone
+      variables:
+        zone_id: int
+        grid: string
+        sensitivity: int
+      then:
+        - lambda: id(fp2).set_zone_config(zone_id, grid, sensitivity);
+    - action: reset_zone
+      variables:
+        zone_id: int
+      then:
+        - lambda: id(fp2).reset_zone_config(zone_id);
+    # Interference / exclude / entry-exit maps from the card (kind: interference | edge | exit)
+    - action: set_map
+      variables:
+        kind: string
+        grid: string
+      then:
+        - lambda: id(fp2).set_map_config(kind, grid);
+    - action: reset_map
+      variables:
+        kind: string
+      then:
+        - lambda: id(fp2).reset_map_config(kind);
 
 ota:
   - platform: esphome
@@ -58,6 +86,9 @@ external_components:
 
 aqara_fp2_accel:
   id: fp2_accel
+  # Ambient light sensor (TI OPT3001) shares the accelerometer's I2C bus
+  illuminance:
+    name: "Illuminance"
 
 aqara_fp2:
   id: fp2
@@ -66,8 +97,32 @@ aqara_fp2:
   uart_id: uart_bus
 
   radar_reset_pin: GPIO13
-  mounting_position: left_corner
+  # Radar FW 99 only tracks in wall mode; corner modes stay silent.
+  mounting_position: wall
   left_right_reverse: false
+
+  # Radar behaviour (optional, defaults shown)
+  proximity: medium            # far / medium / close
+  detection_direction: default # default / left_right
+  ai_person_detection: true    # ignore robot vacuums / pets
+  people_counting: true
+  fall_detection: false
+  # fall_detection_sensitivity: medium
+
+  presence_event:
+    name: "Presence Event"     # enter / leave / approach / away / left_enter / ...
+  people_count:
+    name: "People Count"
+
+  # Sleep monitoring (EXPERIMENTAL).  Turns on the radar's sleep reports.  The
+  # enum values are published raw until they are verified; a person lying
+  # still in a `high` sensitivity zone is tracked by that zone's presence
+  # sensor regardless of this block.
+  # sleep:
+  #   presence:
+  #     name: "Bed Presence"
+  #   state:
+  #     name: "Sleep State"
 
   target_tracking:
     name: "Targets"
@@ -132,11 +187,24 @@ aqara_fp2:
         . . . . . . . . . . . . . .
         . . . . . . . . . . . . . .
         . . . . . . . . . . . . . .
-      presence_sensitivity: high
+      presence_sensitivity: high   # per zone: low / medium / high
       presence:
         name: "Sofa Zone Presence"
       motion:
         name: "Sofa Zone Motion"
+      event:
+        name: "Sofa Zone Event"    # enter / move / exit
+
+  # App-style controls in Home Assistant (persisted on the device)
+  mounting_position_select:    { name: "Mounting Position" }
+  proximity_select:            { name: "Proximity Distance" }
+  detection_direction_select:  { name: "Detection Direction" }
+  sensitivity_select:          { name: "Presence Sensitivity" }
+  left_right_reverse_switch:   { name: "Left-Right Reverse" }
+  ai_person_detection_switch:  { name: "AI Person Detection" }
+  people_counting_switch:      { name: "People Counting" }
+  fall_detection_switch:       { name: "Fall Detection" }
+  sleep_monitoring_switch:     { name: "Sleep Monitoring" }
 
   radar_software_version:
     name: "Radar Software Version"
@@ -151,11 +219,29 @@ binary_sensor:
       inverted: true
     name: "Device Button"
 
-# Status LED (README: IO27 - LED). Using one channel of RGB as status.
-# Unused: IO26, IO14
+# RGB status LED: GPIO14 = red, GPIO26 = green, GPIO27 = blue (all active low)
+output:
+  - platform: ledc
+    id: led_r
+    pin: GPIO14
+    inverted: true
+  - platform: ledc
+    id: led_g
+    pin: GPIO26
+    inverted: true
+  - platform: ledc
+    id: led_b
+    pin: GPIO27
+    inverted: true
+
 light:
-  - platform: status_led
-    name: "Status LED"
-    pin:
-      number: GPIO27
-      inverted: true
+  - platform: rgb
+    name: "LED"
+    id: rgb_led
+    red: led_r
+    green: led_g
+    blue: led_b
+    restore_mode: ALWAYS_OFF
+    effects:
+      - pulse:
+      - strobe:
