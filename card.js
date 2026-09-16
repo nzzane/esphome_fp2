@@ -12,7 +12,9 @@
  *   title: Living room
  *   show_grid: true          show_fov: true          show_trails: true
  *   show_velocity: true      trail_length: 20        show_axes: true
- *   max_height: 520          debug: false
+ *   max_height: 520          cell_size: 0 (px, 0 = fit width)   debug: false
+ *   view: [col, row, cols, rows]   crop of the 16x20 grid (default from the device)
+ *   auto_crop: false               crop to the drawn zones/maps (+1 cell margin)
  */
 
 const FP2_ZONE_COLORS = [
@@ -45,7 +47,7 @@ class AqaraFP2Card extends HTMLElement {
     if (!config.entity_prefix) throw new Error("entity_prefix is required, e.g. sensor.fp2_living_room");
     this.config = {
       show_grid: true, show_fov: true, show_trails: true, show_velocity: true,
-      show_axes: true, trail_length: 20, max_height: 520, ...config,
+      show_axes: true, trail_length: 20, max_height: 520, cell_size: 0, auto_crop: false, ...config,
     };
     this._lastKey = null;
     if (this.content) this.updateCard();
@@ -237,7 +239,11 @@ class AqaraFP2Card extends HTMLElement {
   gather() {
     const mc = this.mapConfig || {};
     const rows = mc.grid_rows || 20, cols = mc.grid_cols || 16;
-    const view = mc.view || (mc.mounting_position && mc.mounting_position !== "wall" ? [2, 0, 14, 14] : [0, 0, 16, 20]);
+    let view = mc.view || (mc.mounting_position && mc.mounting_position !== "wall" ? [2, 0, 14, 14] : [0, 0, 16, 20]);
+    if (Array.isArray(this.config.view) && this.config.view.length === 4) {
+      const [c, r, w, h] = this.config.view.map(Number);
+      view = [Math.max(0, c), Math.max(0, r), Math.min(cols - c, w), Math.min(rows - r, h)];
+    }
     const mounting = this.st(this.ent("select", "mounting_position")) || mc.mounting_position || "wall";
     const corner = /corner/.test(mounting);
     const parse = (hex) => this.parseGrid(hex, rows, cols);
@@ -273,6 +279,15 @@ class AqaraFP2Card extends HTMLElement {
       ...l, id: `map:${l.key}`, grid: parse(mc[`${l.key}_grid`]), hex: mc[`${l.key}_grid`],
       empty: !/[1-9a-f]/i.test(mc[`${l.key}_grid`] || ""), override: !!mc[`${l.key}_override`],
     }));
+    if (this.config.auto_crop && !this.edit) {
+      let c0 = cols, r0 = rows, c1 = -1, r1 = -1;
+      const grids = [...zones.map((z) => z.grid), ...layers.map((l) => l.grid)];
+      grids.forEach((g) => g.forEach((row, r) => row.forEach((v, c) => { if (v) { c0 = Math.min(c0, c); c1 = Math.max(c1, c); r0 = Math.min(r0, r); r1 = Math.max(r1, r); } })));
+      if (c1 >= 0) {
+        c0 = Math.max(0, c0 - 1); r0 = Math.max(0, r0 - 1); c1 = Math.min(cols - 1, c1 + 1); r1 = Math.min(rows - 1, r1 + 1);
+        view = [c0, r0, c1 - c0 + 1, r1 - r0 + 1];
+      }
+    }
     return {
       rows, cols, view, mounting, corner, layers,
       edge: parse(mc.edge_grid), interference: parse(mc.interference_grid), exit: parse(mc.exit_grid),
@@ -346,7 +361,9 @@ class AqaraFP2Card extends HTMLElement {
     if (!W) return;
     const [c0, r0, vc, vr] = d.view;
     const axes = this.config.show_axes ? 18 : 0;
-    const cell = Math.max(8, Math.min((W - axes) / vc, (this.config.max_height - axes) / vr));
+    const cell = this.config.cell_size > 0
+      ? this.config.cell_size
+      : Math.max(8, Math.min((W - axes) / vc, (this.config.max_height - axes) / vr));
     const cw = Math.round(cell * vc + axes), ch = Math.round(cell * vr + axes);
     const dpr = window.devicePixelRatio || 1;
     this.canvas.width = cw * dpr; this.canvas.height = ch * dpr;
