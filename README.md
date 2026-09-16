@@ -70,12 +70,12 @@ See [example_config.yaml](example_config.yaml) for a complete working configurat
 | `ai_person_detection` | `true` | Ignore robot vacuums / pets |
 | `people_counting` | `true` | Enable people count reports |
 | `fall_detection` | `false` | With `fall_detection_sensitivity` |
-| `derive_presence` | `true` | Derive presence/motion/zone occupancy from targets when the radar sends no events (`absence_timeout`: 30s) |
+| `derive_presence` | `true` | Derive presence/motion/zone occupancy from targets when the radar sends no events (`absence_timeout`: 30s). Targets in exclude or interference cells are ignored; the radar itself keeps streaming them. |
 | `presence_event`, `people_count` | – | Text / numeric sensors |
 | `zones[].presence_sensitivity` | `medium` | Per-zone sensitivity |
 | `zones[].event` | – | Text sensor: `enter` / `move` / `exit` |
 | `*_select`, `*_switch` | – | HA entities for each setting, e.g. `mounting_position_select`, `sensitivity_select`, `ai_person_detection_switch` (see example) |
-| `sleep` | – | Experimental sleep monitoring (raw values, changes radar mode) |
+| `sleep` | – | Experimental sleep monitoring: `enabled` (default off), bed size, raw `presence`/`state`/`in_out`/`event`/`data` sensors |
 
 `aqara_fp2_accel`: `illuminance` exposes the on-board OPT3001 light sensor.
 

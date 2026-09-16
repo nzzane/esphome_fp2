@@ -113,6 +113,7 @@ CONF_EVENT = "event"
 SLEEP_SCHEMA = cv.Schema(
     {
         # Raw values as written by the stock firmware; meanings not verified.
+        cv.Optional("enabled", default=False): cv.boolean,  # default state of the sleep mode (switch overrides)
         cv.Optional("mount_position", default=1): cv.int_range(min=0, max=255),
         cv.Optional("bed_width", default=120): cv.int_range(min=0, max=65535),   # cm
         cv.Optional("bed_length", default=180): cv.int_range(min=0, max=65535),  # cm
@@ -397,7 +398,7 @@ async def to_code(config):
 
     if CONF_SLEEP in config:
         sleep_conf = config[CONF_SLEEP]
-        cg.add(var.set_sleep_enabled(True))
+        cg.add(var.set_sleep_enabled(sleep_conf["enabled"]))
         cg.add(var.set_sleep_mount_position(sleep_conf["mount_position"]))
         cg.add(var.set_sleep_bed_size(sleep_conf["bed_width"], sleep_conf["bed_length"]))
         for key, (new, funcName) in SLEEP_SENSOR_MAP.items():

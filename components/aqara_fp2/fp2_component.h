@@ -498,6 +498,9 @@ protected:
   void update_derived_states_(const std::vector<uint8_t> &payload, uint8_t count);
   void check_derived_absence_();
   bool zone_contains_(const FP2Zone *zone, int16_t x, int16_t y) const;
+  bool target_cell_(int16_t x, int16_t y, int &col, int &row) const;
+  bool grid_has_(const GridMap &g, int col, int row) const;
+  bool target_ignored_(int16_t x, int16_t y) const;  // in an exclude or interference cell
 
   // Radar watchdog: re-run the init sequence if the heartbeat stops
   static const uint32_t HEARTBEAT_TIMEOUT_MS = 15000;

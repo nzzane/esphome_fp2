@@ -114,15 +114,24 @@ aqara_fp2:
   people_count:
     name: "People Count"
 
-  # Sleep monitoring (EXPERIMENTAL).  Turns on the radar's sleep reports.  The
-  # enum values are published raw until they are verified; a person lying
-  # still in a `high` sensitivity zone is tracked by that zone's presence
-  # sensor regardless of this block.
-  # sleep:
-  #   presence:
-  #     name: "Bed Presence"
-  #   state:
-  #     name: "Sleep State"
+  # Sleep monitoring (EXPERIMENTAL). Entities always exist; the radar's sleep
+  # reports only arrive while the mode is on (`enabled` or the
+  # sleep_monitoring_switch). Values are raw until verified.
+  sleep:
+    enabled: false
+    mount_position: 1
+    bed_width: 150      # cm
+    bed_length: 200     # cm
+    presence:
+      name: "Bed Presence"
+    state:
+      name: "Sleep State"
+    in_out:
+      name: "Sleep In-Out"
+    event:
+      name: "Sleep Event"
+    data:
+      name: "Sleep Data"
 
   target_tracking:
     name: "Targets"

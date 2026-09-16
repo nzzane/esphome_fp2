@@ -521,7 +521,10 @@ class AqaraFP2Card extends HTMLElement {
     d.targets.forEach((t) => {
       const g = this.toGrid(t.x, t.y);
       const px = X(g.gc), py = Y(g.gr);
+      const cc = Math.floor(g.gc), cr = Math.floor(g.gr);
+      const ignored = !(d.edge[cr] && d.interference[cr]) || d.edge[cr][cc] || d.interference[cr][cc];
       const col = t.posture >= 2 ? [150, 100, 255] : t.posture === 1 ? [80, 200, 120] : [255, 190, 0];
+      ctx.globalAlpha = ignored ? 0.35 : 1;
       if (this.config.show_velocity && t.velocity) {
         const s = this.sensorCell();
         const dx = g.gc - s.gc, dy = g.gr - s.gr, len = Math.hypot(dx, dy) || 1;
@@ -534,6 +537,7 @@ class AqaraFP2Card extends HTMLElement {
       ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
       ctx.fillStyle = "#000"; ctx.font = `bold ${Math.min(cell * 0.4, 11)}px sans-serif`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
       ctx.fillText(String(t.id), px, py);
+      ctx.globalAlpha = 1;
     });
 
     // sensor marker
@@ -647,7 +651,9 @@ class AqaraFP2Card extends HTMLElement {
     tt.innerHTML = d.targets.map((t) => {
       const m = this.toMeters(t.x, t.y);
       const post = { 0: "moving", 1: "sitting", 2: "lying", 255: "-" }[t.posture] ?? t.posture;
-      return `<tr><td>#${t.id}</td><td>${m.x >= 0 ? "+" : ""}${m.x.toFixed(2)}, ${m.y.toFixed(2)} m</td><td>${(t.velocity / (this.data.corner ? 100 : 40)).toFixed(2)} m/s</td><td>${post}</td><td>${t.snr}</td></tr>`;
+      const g = this.toGrid(t.x, t.y), cc = Math.floor(g.gc), cr = Math.floor(g.gr);
+      const ign = !(d.edge[cr] && d.interference[cr]) || d.edge[cr][cc] || d.interference[cr][cc];
+      return `<tr style="${ign ? "opacity:.5" : ""}"><td>#${t.id}${ign ? " (ignored)" : ""}</td><td>${m.x >= 0 ? "+" : ""}${m.x.toFixed(2)}, ${m.y.toFixed(2)} m</td><td>${(t.velocity / (this.data.corner ? 100 : 40)).toFixed(2)} m/s</td><td>${post}</td><td>${t.snr}</td></tr>`;
     }).join("");
   }
 

@@ -966,6 +966,32 @@ void FP2Component::handle_location_tracking_report_(const std::vector<uint8_t> &
 // Target coordinates are ~cm, radar at the top of the 14x14 grid (0.5 m cells).
 // Corner modes: X +400 = left edge, -400 = right edge, Y 0..800 (hansihe).
 // Wall mode: sensor top-centre, X negative = right.
+bool FP2Component::target_cell_(int16_t x, int16_t y, int &col, int &row) const {
+  if (mounting_position_ == 0x02 || mounting_position_ == 0x03) {
+    col = 2 + (int) ((-(float) x + 400.0f) / 800.0f * 14.0f);
+    row = (int) ((float) y / 800.0f * 14.0f);
+  } else {
+    col = 8 - (int) floorf((float) x / 20.0f) - 1;
+    row = (int) ((float) y / 20.0f);
+  }
+  return col >= 0 && col <= 15 && row >= 0 && row <= 19;
+}
+
+bool FP2Component::grid_has_(const GridMap &g, int col, int row) const {
+  uint16_t bits = (g[row * 2] << 8) | g[row * 2 + 1];
+  return (bits >> (15 - col)) & 1;
+}
+
+// The radar keeps streaming targets inside excluded / interference cells; the
+// maps only affect its own presence logic. Apply them to derived presence too.
+bool FP2Component::target_ignored_(int16_t x, int16_t y) const {
+  int col, row;
+  if (!target_cell_(x, y, col, row)) return true;  // outside the grid
+  if (has_edge_grid_ && grid_has_(edge_grid_, col, row)) return true;
+  if (has_interference_grid_ && grid_has_(interference_grid_, col, row)) return true;
+  return false;
+}
+
 bool FP2Component::zone_contains_(const FP2Zone *zone, int16_t x, int16_t y) const {
   int col, row;
   if (mounting_position_ == 0x02 || mounting_position_ == 0x03) {
@@ -987,6 +1013,7 @@ void FP2Component::update_derived_states_(const std::vector<uint8_t> &payload, u
   uint32_t now = millis();
   if (zone_last_seen_ms_.size() != zones_.size()) zone_last_seen_ms_.assign(zones_.size(), 0);
   bool moving = false;
+  int valid = 0;
   std::vector<bool> zone_hit(zones_.size(), false);
   for (int i = 0; i < count; i++) {
     int off = 6 + i * 14;
@@ -994,11 +1021,13 @@ void FP2Component::update_derived_states_(const std::vector<uint8_t> &payload, u
     int16_t x = (int16_t)((payload[off + 1] << 8) | payload[off + 2]);
     int16_t y = (int16_t)((payload[off + 3] << 8) | payload[off + 4]);
     int16_t v = (int16_t)((payload[off + 7] << 8) | payload[off + 8]);
+    if (target_ignored_(x, y)) continue;
+    valid++;
     if (v > motion_velocity_threshold_ || v < -motion_velocity_threshold_) moving = true;
     for (size_t z = 0; z < zones_.size(); z++)
       if (!zone_hit[z] && !zones_[z]->is_empty() && zone_contains_(zones_[z], x, y)) zone_hit[z] = true;
   }
-  if (count > 0) {
+  if (valid > 0) {
     last_target_seen_ms_ = now;
     if (!radar_presence_seen_) {
       if (global_presence_sensor_ != nullptr && (!global_presence_sensor_->has_state() || !global_presence_sensor_->state))
