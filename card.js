@@ -7,7 +7,8 @@
  * api actions).
  *
  * Config:
- *   entity_prefix: sensor.fp2_living_room   (required; "<domain>.<device>")
+ *   entity_prefix: sensor.fp2_living_room   (required; "<domain>.<entity id prefix>")
+ *   device: fp2-living-room                  (ESPHome name; only if it differs from the entity prefix)
  *   title: Living room
  *   show_grid: true          show_fov: true          show_trails: true
  *   show_velocity: true      trail_length: 20        show_axes: true
@@ -64,6 +65,22 @@ class AqaraFP2Card extends HTMLElement {
   // ------------------------------------------------------------- entities
   deviceName() { return this.config.entity_prefix.replace(/^[^.]+\./, ""); }
 
+  // ESPHome api actions are registered as esphome.<device_name>_<action>, where
+  // device_name is the ESPHome `name` (dashes -> underscores). Entity ids use the
+  // friendly name instead, so the two can differ (fp2-test2 vs "FP2 Test 2").
+  serviceDevice() {
+    if (this.config.device) return this.config.device.replace(/-/g, "_");
+    const svc = (this._hass && this._hass.services && this._hass.services.esphome) || {};
+    const candidates = Object.keys(svc).filter((k) => k.endsWith("_get_map_config")).map((k) => k.slice(0, -"_get_map_config".length));
+    const dev = this.deviceName();
+    if (candidates.includes(dev)) return dev;
+    const squash = (x) => x.replace(/_/g, "");
+    const m = candidates.filter((c) => squash(c) === squash(dev));
+    if (m.length === 1) return m[0];
+    if (candidates.length === 1) return candidates[0];
+    return dev;
+  }
+
   ent(domain, objectId) {
     if (!objectId) return null;
     const dev = this.deviceName();
@@ -100,7 +117,7 @@ class AqaraFP2Card extends HTMLElement {
   }
 
   async fetchMapConfig() {
-    const dev = this.deviceName();
+    const dev = this.serviceDevice();
     try {
       const r = await this._hass.callService("esphome", `${dev}_get_map_config`, {}, undefined, undefined, true);
       this.mapConfig = (r && r.response) || {};
@@ -588,7 +605,7 @@ class AqaraFP2Card extends HTMLElement {
   }
 
   async callSetZone(zoneId, hex, sens) {
-    const dev = this.deviceName();
+    const dev = this.serviceDevice();
     try {
       await this._hass.callService("esphome", `${dev}_set_zone`, { zone_id: zoneId, grid: hex, sensitivity: sens });
       await this.fetchMapConfig();
@@ -651,7 +668,7 @@ class AqaraFP2Card extends HTMLElement {
     const hex = this.gridToHex(this.edit.cells);
     if (this.edit.isLayer) {
       try {
-        await this._hass.callService("esphome", `${this.deviceName()}_set_map`, { kind: this.edit.kind, grid: hex });
+        await this._hass.callService("esphome", `${this.serviceDevice()}_set_map`, { kind: this.edit.kind, grid: hex });
         await this.fetchMapConfig();
         this.toggleEdit(false);
       } catch (err) {
@@ -667,9 +684,9 @@ class AqaraFP2Card extends HTMLElement {
     if (!this.edit) return;
     try {
       if (this.edit.isLayer)
-        await this._hass.callService("esphome", `${this.deviceName()}_reset_map`, { kind: this.edit.kind });
+        await this._hass.callService("esphome", `${this.serviceDevice()}_reset_map`, { kind: this.edit.kind });
       else
-        await this._hass.callService("esphome", `${this.deviceName()}_reset_zone`, { zone_id: this.edit.zoneId });
+        await this._hass.callService("esphome", `${this.serviceDevice()}_reset_zone`, { zone_id: this.edit.zoneId });
       await this.fetchMapConfig();
       this.toggleEdit(false);
     } catch (err) { console.error("[FP2 Card] reset_zone failed", err); }

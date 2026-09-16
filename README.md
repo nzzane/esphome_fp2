@@ -138,6 +138,7 @@ This is the primary and recommended installation method.
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `entity_prefix` | string | **required** | Entity prefix (e.g., `sensor.fp2`) |
+| `device` | string | auto | ESPHome device name, only if it differs from the entity prefix (e.g. `fp2-test2` vs `sensor.fp2_test_2`) |
 | `title` | string | "Aqara FP2 Presence Sensor" | Card title |
 | `show_grid` | boolean | `true` | Show grid lines |
 | `show_fov` | boolean | `true` | Shade the radar's field of view |
