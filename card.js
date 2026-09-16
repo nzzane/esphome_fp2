@@ -13,8 +13,12 @@
  *   show_grid: true          show_fov: true          show_trails: true
  *   show_velocity: true      trail_length: 20        show_axes: true
  *   max_height: 520          cell_size: 0 (px, 0 = fit width)   debug: false
- *   view: [col, row, cols, rows]   crop of the 16x20 grid (default from the device)
+ *   width: 5                       shown area in metres, centred on the radar (wall mode)
+ *   depth: 5                       shown depth in metres from the radar
+ *   shift: 0                       move the shown area left (+) / right (-) in metres
+ *   view: [col, row, cols, rows]   raw crop of the 16x20 grid (overrides width/depth)
  *   auto_crop: false               crop to the drawn zones/maps (+1 cell margin)
+ *   exclude_outside_view: false    keep the radar's exclude map = everything outside `view`
  */
 
 const FP2_ZONE_COLORS = [
@@ -47,7 +51,7 @@ class AqaraFP2Card extends HTMLElement {
     if (!config.entity_prefix) throw new Error("entity_prefix is required, e.g. sensor.fp2_living_room");
     this.config = {
       show_grid: true, show_fov: true, show_trails: true, show_velocity: true,
-      show_axes: true, trail_length: 20, max_height: 520, cell_size: 0, auto_crop: false, ...config,
+      show_axes: true, trail_length: 20, max_height: 520, cell_size: 0, auto_crop: false, exclude_outside_view: false, ...config,
     };
     this._lastKey = null;
     if (this.content) this.updateCard();
@@ -130,6 +134,7 @@ class AqaraFP2Card extends HTMLElement {
     }
     this._lastKey = null;
     this.updateCard();
+    this.applyExcludeOutsideView();
   }
 
   // ------------------------------------------------------------------ DOM
@@ -149,6 +154,7 @@ class AqaraFP2Card extends HTMLElement {
           <select class="e-sens"><option value="1">Low</option><option value="2">Medium</option><option value="3">High</option></select>
           <span class="e-cells"></span>
           <span class="sp"></span>
+          <button class="e-outside" title="Mark every cell outside the current view as excluded">Exclude outside view</button>
           <button class="e-clear">Clear</button>
           <button class="e-reset" title="Revert to the YAML grid">Reset</button>
           <button class="e-cancel">Cancel</button>
@@ -211,6 +217,7 @@ class AqaraFP2Card extends HTMLElement {
     this.querySelector(".e-zone").addEventListener("change", (e) => this.selectEditZone(e.target.value));
     this.querySelector(".e-sens").addEventListener("change", (e) => { if (this.edit) this.edit.sensitivity = Number(e.target.value); });
     this.querySelector(".e-clear").addEventListener("click", () => this.editClear());
+    this.querySelector(".e-outside").addEventListener("click", () => this.editOutsideView());
     this.querySelector(".e-reset").addEventListener("click", () => this.editReset());
     this.querySelector(".e-cancel").addEventListener("click", () => this.toggleEdit(false));
     this.querySelector(".e-save").addEventListener("click", () => this.editSave());
@@ -239,13 +246,21 @@ class AqaraFP2Card extends HTMLElement {
   gather() {
     const mc = this.mapConfig || {};
     const rows = mc.grid_rows || 20, cols = mc.grid_cols || 16;
+    const mounting = this.st(this.ent("select", "mounting_position")) || mc.mounting_position || "wall";
+    const corner = /corner/.test(mounting);
     let view = mc.view || (mc.mounting_position && mc.mounting_position !== "wall" ? [2, 0, 14, 14] : [0, 0, 16, 20]);
+    if (this.config.width || this.config.depth) {
+      const cw = Math.max(1, Math.round((this.config.width || 8) / 0.5));
+      const rh = Math.max(1, Math.round((this.config.depth || 10) / 0.5));
+      const sc = corner ? (mounting === "right_corner" ? 16 : 2) : 8;
+      let c = corner ? (mounting === "right_corner" ? sc - cw : sc) : Math.round(sc - cw / 2 - (this.config.shift || 0) / 0.5);
+      c = Math.max(0, Math.min(cols - cw, c));
+      view = [c, 0, Math.min(cols, cw), Math.min(rows, rh)];
+    }
     if (Array.isArray(this.config.view) && this.config.view.length === 4) {
       const [c, r, w, h] = this.config.view.map(Number);
       view = [Math.max(0, c), Math.max(0, r), Math.min(cols - c, w), Math.min(rows - r, h)];
     }
-    const mounting = this.st(this.ent("select", "mounting_position")) || mc.mounting_position || "wall";
-    const corner = /corner/.test(mounting);
     const parse = (hex) => this.parseGrid(hex, rows, cols);
 
     const zones = (mc.zones || []).map((z, i) => {
@@ -313,6 +328,33 @@ class AqaraFP2Card extends HTMLElement {
       for (let c = 0; c < cols; c++) g[r][c] = (bits >> (15 - c)) & 1;
     }
     return g;
+  }
+
+  outsideViewGrid() {
+    const d = this.data;
+    const [c0, r0, vc, vr] = d.view;
+    return Array.from({ length: d.rows }, (_, r) => Array.from({ length: d.cols }, (_, c) =>
+      (r < r0 || r >= r0 + vr || c < c0 || c >= c0 + vc) ? 1 : 0));
+  }
+
+  async applyExcludeOutsideView() {
+    if (!this.config.exclude_outside_view || !this.data || this._excludeApplied) return;
+    const want = this.gridToHex(this.outsideViewGrid());
+    const have = (this.mapConfig && this.mapConfig.edge_grid) || "";
+    if (want === have) { this._excludeApplied = true; return; }
+    this._excludeApplied = true;
+    try {
+      await this._hass.callService("esphome", `${this.serviceDevice()}_set_map`, { kind: "edge", grid: want });
+      await this.fetchMapConfig();
+    } catch (err) { console.error("[FP2 Card] exclude_outside_view: set_map failed", err); }
+  }
+
+  editOutsideView() {
+    if (!this.edit) return;
+    if (!this.edit.isLayer || this.edit.kind !== "edge") this.selectEditZone("map:edge");
+    this.querySelector(".e-zone").value = "map:edge";
+    this.edit.cells = this.outsideViewGrid();
+    this.updateEditInfo(); this.render();
   }
 
   gridToHex(g) {

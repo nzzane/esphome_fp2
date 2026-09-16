@@ -145,7 +145,9 @@ This is the primary and recommended installation method.
 | `show_trails` | boolean | `true` | Draw each target's recent path |
 | `show_velocity` | boolean | `true` | Draw a velocity arrow on each target |
 | `show_axes` | boolean | `true` | Metre axes |
-| `view` | list | from device | Crop of the 16×20 grid as `[col, row, cols, rows]`, e.g. `[4, 0, 8, 8]` |
+| `width`, `depth` | number | 8, 10 | Shown area in metres, centred on the radar (`shift` moves it left/right) |
+| `exclude_outside_view` | boolean | `false` | Keep the radar's exclude map set to everything outside the shown area |
+| `view` | list | from device | Raw crop of the 16×20 grid as `[col, row, cols, rows]` (overrides `width`/`depth`) |
 | `auto_crop` | boolean | `false` | Crop to the drawn zones/maps plus one cell |
 | `cell_size` | number | `0` | Cell size in px (`0` fits the card width, limited by `max_height`) |
 | `max_height` | number | `520` | Maximum canvas height in px |
