@@ -3,7 +3,7 @@ import json
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import pins
-from esphome.components import binary_sensor, sensor, switch, uart
+from esphome.components import binary_sensor, sensor, switch, select, uart
 from esphome.components import text_sensor as text_sensor_
 from esphome.const import (
     CONF_DEVICE_CLASS,
@@ -20,6 +20,7 @@ from esphome.const import (
     DEVICE_CLASS_MOTION,
     STATE_CLASS_MEASUREMENT,
     ENTITY_CATEGORY_DIAGNOSTIC,
+    ENTITY_CATEGORY_CONFIG,
     UNIT_CELSIUS,
     ICON_THERMOMETER,
     ICON_MOTION_SENSOR,
@@ -30,11 +31,31 @@ from esphome.util import Registry
 from ..aqara_fp2_accel import AqaraFP2Accel
 
 DEPENDENCIES = ["uart"]
-AUTO_LOAD = ["binary_sensor", "text_sensor", "sensor", "switch", "json"]
+AUTO_LOAD = ["binary_sensor", "sensor", "text_sensor", "switch", "select", "json"]
 
 aqara_fp2_ns = cg.esphome_ns.namespace("aqara_fp2")
 FP2Component = aqara_fp2_ns.class_("FP2Component", cg.Component, uart.UARTDevice)
-FP2LocationSwitch = aqara_fp2_ns.class_("FP2LocationSwitch", switch.Switch)
+FP2SettingSelect = aqara_fp2_ns.class_("FP2SettingSelect", select.Select, cg.Component)
+FP2SettingSwitch = aqara_fp2_ns.class_("FP2SettingSwitch", switch.Switch, cg.Component)
+Setting = aqara_fp2_ns.enum("Setting", is_class=True)
+
+# HA-controllable settings: key -> (Setting enum, options)
+SETTING_SELECTS = {
+    "mounting_position_select": ("MOUNTING_POSITION", ["wall", "left_corner", "right_corner"], "mdi:wall"),
+    "proximity_select": ("PROXIMITY", ["far", "medium", "close"], "mdi:map-marker-distance"),
+    "detection_direction_select": ("DETECTION_DIRECTION", ["default", "left_right"], "mdi:arrow-left-right"),
+    "sensitivity_select": ("SENSITIVITY", ["low", "medium", "high"], "mdi:tune"),
+    "fall_sensitivity_select": ("FALL_SENSITIVITY", ["low", "medium", "high"], "mdi:tune"),
+}
+SETTING_SWITCHES = {
+    "left_right_reverse_switch": ("LEFT_RIGHT_REVERSE", "mdi:swap-horizontal"),
+    "ai_person_detection_switch": ("AI_PERSON_DETECTION", "mdi:robot-vacuum"),
+    "people_counting_switch": ("PEOPLE_COUNTING", "mdi:account-group"),
+    "fall_detection_switch": ("FALL_DETECTION", "mdi:human-handsdown"),
+    "sleep_monitoring_switch": ("SLEEP_MONITORING", "mdi:sleep"),
+}
+
+FP2LocationSwitch = aqara_fp2_ns.class_("FP2LocationSwitch", switch.Switch, cg.Component)
 FP2Zone = aqara_fp2_ns.class_("FP2Zone", cg.Component)
 
 CONF_FP2_ID = "fp2_id"
@@ -76,28 +97,72 @@ SENSITIVITY_LEVELS = {
     "high": 3,
 }
 
+PROXIMITY_LEVELS = {"far": 0, "medium": 1, "close": 2}
+DETECTION_DIRECTIONS = {"default": 0, "left_right": 1}
+
+CONF_PROXIMITY = "proximity"
+CONF_DETECTION_DIRECTION = "detection_direction"
+CONF_AI_PERSON_DETECTION = "ai_person_detection"
+CONF_PEOPLE_COUNTING = "people_counting"
+CONF_FALL_DETECTION = "fall_detection"
+CONF_PRESENCE_EVENT = "presence_event"
+CONF_PEOPLE_COUNT = "people_count"
+CONF_SLEEP = "sleep"
+CONF_EVENT = "event"
+
+SLEEP_SCHEMA = cv.Schema(
+    {
+        # Raw values as written by the stock firmware; meanings not verified.
+        cv.Optional("mount_position", default=1): cv.int_range(min=0, max=255),
+        cv.Optional("bed_width", default=120): cv.int_range(min=0, max=65535),   # cm
+        cv.Optional("bed_length", default=180): cv.int_range(min=0, max=65535),  # cm
+        cv.Optional("presence"): binary_sensor.binary_sensor_schema(
+            device_class=DEVICE_CLASS_OCCUPANCY, icon="mdi:bed"
+        ),
+        cv.Optional("state"): sensor.sensor_schema(
+            icon="mdi:sleep", accuracy_decimals=0, entity_category=ENTITY_CATEGORY_DIAGNOSTIC
+        ),
+        cv.Optional("in_out"): sensor.sensor_schema(
+            icon="mdi:bed-outline", accuracy_decimals=0, entity_category=ENTITY_CATEGORY_DIAGNOSTIC
+        ),
+        cv.Optional("event"): sensor.sensor_schema(
+            icon="mdi:sleep", accuracy_decimals=0, entity_category=ENTITY_CATEGORY_DIAGNOSTIC
+        ),
+        cv.Optional("data"): text_sensor_.text_sensor_schema(entity_category=ENTITY_CATEGORY_DIAGNOSTIC),
+    }
+)
+
 
 def parse_ascii_grid(value):
     """
     Parses a 14x14 ASCII grid into a 40-byte (320-bit) protocol blob.
+    An empty string yields an empty (disabled) zone that can be drawn later
+    from the Home Assistant card.
     Protocol Grid: 20 rows x 16 cols.
     Active Area: Centered 14x14 (Rows 3-16, Cols 1-14).
 
     Chars: 'x', 'X' = Active. '.', ' ' = Inactive.
     """
+    if not str(value).strip():
+        return [0] * 40
     lines = value.strip().splitlines()
     # Filter out empty lines or comments if needed, but strict 14 lines is better for now
     lines = [li.strip() for li in lines if li.strip()]
 
-    if len(lines) != 14:
-        raise cv.Invalid(f"Grid must have exactly 14 rows, got {len(lines)}")
+    # 14 x 14 (corner view, placed at columns 2-15) or the full 20 x 16 grid
+    if len(lines) == 14:
+        width, offset_col = 14, 2
+    elif len(lines) == 20:
+        width, offset_col = 16, 0
+    else:
+        raise cv.Invalid(f"Grid must have 14 rows (14x14 corner view) or 20 rows (20x16 full grid), got {len(lines)}")
 
     for i, line in enumerate(lines):
         # Remove whitespace
         clean_line = line.replace(" ", "")
-        if len(clean_line) != 14:
+        if len(clean_line) != width:
             raise cv.Invalid(
-                f"Row {i + 1} must have 14 characters (excluding spaces), got {len(clean_line)}: '{clean_line}'"
+                f"Row {i + 1} must have {width} characters (excluding spaces), got {len(clean_line)}: '{clean_line}'"
             )
 
     # Initialize 20x16 grid (320 bits -> 40 bytes)
@@ -109,9 +174,8 @@ def parse_ascii_grid(value):
     # Input Col 0 -> Output Col 1
 
     offset_row = 0
-    offset_col = 2
 
-    for r in range(14):
+    for r in range(len(lines)):
         line = lines[r].replace(" ", "")
         out_r = r + offset_row
 
@@ -123,7 +187,7 @@ def parse_ascii_grid(value):
 
         row_val = 0
 
-        for c in range(14):
+        for c in range(width):
             char = line[c]
             if char in ("x", "X"):
                 out_c = c + offset_col
@@ -163,8 +227,9 @@ ZONE_SCHEMA = (
     cv.Schema(
         {
             cv.GenerateID(CONF_ID): cv.declare_id(FP2Zone),
-            cv.Required(CONF_GRID): parse_ascii_grid,
+            cv.Optional(CONF_GRID, default=""): parse_ascii_grid,
             cv.Optional("zone_map_sensor"): text_sensor_.text_sensor_schema(entity_category=ENTITY_CATEGORY_DIAGNOSTIC),
+            cv.Optional(CONF_EVENT): text_sensor_.text_sensor_schema(icon="mdi:motion-sensor"),
         }
     ).extend(ZONE_BASE_SCHEMA)
 )
@@ -181,14 +246,41 @@ CONFIG_SCHEMA = (
             ),
 
             cv.Optional(CONF_LEFT_RIGHT_REVERSE, default=False): cv.boolean,
+            cv.Optional(CONF_PROXIMITY, default="medium"): cv.enum(PROXIMITY_LEVELS),
+            cv.Optional(CONF_DETECTION_DIRECTION, default="default"): cv.enum(DETECTION_DIRECTIONS),
+            cv.Optional(CONF_AI_PERSON_DETECTION, default=True): cv.boolean,
+            cv.Optional(CONF_PEOPLE_COUNTING, default=True): cv.boolean,
+            cv.Optional(CONF_FALL_DETECTION, default=False): cv.boolean,
+            cv.Optional(CONF_FALL_DETECTION_SENSITIVITY, default="medium"): cv.enum(SENSITIVITY_LEVELS),
+            cv.Optional(CONF_PRESENCE_EVENT): text_sensor_.text_sensor_schema(icon="mdi:motion-sensor"),
+            cv.Optional(CONF_PEOPLE_COUNT): sensor.sensor_schema(
+                icon="mdi:account-group", accuracy_decimals=0, state_class=STATE_CLASS_MEASUREMENT
+            ),
+            cv.Optional(CONF_SLEEP): SLEEP_SCHEMA,
+            # Debug only: report a fixed orientation to the radar
+            cv.Optional("debug_force_direction"): cv.int_range(min=0, max=8),
+            cv.Optional("debug_replay_stock_init", default=False): cv.boolean,
+            cv.Optional("debug_force_angle", default=45): cv.int_range(min=0, max=360),
+            **{
+                cv.Optional(k): select.select_schema(FP2SettingSelect, icon=icon, entity_category=ENTITY_CATEGORY_CONFIG)
+                for k, (_, _, icon) in SETTING_SELECTS.items()
+            },
+            **{
+                cv.Optional(k): switch.switch_schema(FP2SettingSwitch, icon=icon, entity_category=ENTITY_CATEGORY_CONFIG, default_restore_mode="DISABLED")
+                for k, (_, icon) in SETTING_SWITCHES.items()
+            },
             cv.Optional(CONF_INTERFERENCE_GRID): parse_ascii_grid,
             cv.Optional(CONF_EXIT_GRID): parse_ascii_grid,
             cv.Optional(CONF_EDGE_GRID): parse_ascii_grid,
 
             cv.Optional(CONF_TARGET_TRACKING): text_sensor_.text_sensor_schema(entity_category=ENTITY_CATEGORY_DIAGNOSTIC),
             cv.Optional(CONF_LOCATION_REPORT_SWITCH): switch.switch_schema(
-                FP2LocationSwitch
+                FP2LocationSwitch, default_restore_mode="RESTORE_DEFAULT_ON"
             ),
+            # Derive presence/motion/zone occupancy from the target stream when
+            # the radar does not report them (FW 99 in wall mode).
+            cv.Optional("derive_presence", default=True): cv.boolean,
+            cv.Optional("absence_timeout", default="30s"): cv.positive_time_period_milliseconds,
 
             cv.Optional("edge_label_grid_sensor"): text_sensor_.text_sensor_schema(entity_category=ENTITY_CATEGORY_DIAGNOSTIC),
             cv.Optional("entry_exit_grid_sensor"): text_sensor_.text_sensor_schema(entity_category=ENTITY_CATEGORY_DIAGNOSTIC),
@@ -220,6 +312,8 @@ SENSOR_MAP = {
     CONF_RADAR_SOFTWARE_VERSION: (text_sensor_.new_text_sensor, "set_radar_software_sensor"),
     CONF_LOCATION_REPORT_SWITCH: (switch.new_switch, "set_location_report_switch"),
     CONF_TARGET_TRACKING: (text_sensor_.new_text_sensor, "set_target_tracking_sensor"),
+    CONF_PRESENCE_EVENT: (text_sensor_.new_text_sensor, "set_presence_event_sensor"),
+    CONF_PEOPLE_COUNT: (sensor.new_sensor, "set_people_count_sensor"),
 
     # Text config sensors
     "edge_label_grid_sensor": (text_sensor_.new_text_sensor, "set_edge_label_grid_sensor"),
@@ -234,6 +328,15 @@ ZONE_SENSOR_MAP = {
 
     # Text config sensors
     "zone_map_sensor": (text_sensor_.new_text_sensor, "set_map_sensor"),
+    CONF_EVENT: (text_sensor_.new_text_sensor, "set_event_sensor"),
+}
+
+SLEEP_SENSOR_MAP = {
+    "presence": (binary_sensor.new_binary_sensor, "set_sleep_presence_sensor"),
+    "state": (sensor.new_sensor, "set_sleep_state_sensor"),
+    "in_out": (sensor.new_sensor, "set_sleep_inout_sensor"),
+    "event": (sensor.new_sensor, "set_sleep_event_sensor"),
+    "data": (text_sensor_.new_text_sensor, "set_sleep_data_sensor"),
 }
 
 async def to_code(config):
@@ -266,6 +369,41 @@ async def to_code(config):
 
     cg.add(var.set_mounting_position(config[CONF_MOUNTING_POSITION]))
     cg.add(var.set_left_right_reverse(config[CONF_LEFT_RIGHT_REVERSE]))
+    cg.add(var.set_proximity(config[CONF_PROXIMITY]))
+    cg.add(var.set_detection_direction(config[CONF_DETECTION_DIRECTION]))
+    cg.add(var.set_ai_person_detection(config[CONF_AI_PERSON_DETECTION]))
+    cg.add(var.set_people_counting(config[CONF_PEOPLE_COUNTING]))
+    cg.add(var.set_fall_detection(config[CONF_FALL_DETECTION]))
+    cg.add(var.set_fall_detection_sensitivity(config[CONF_FALL_DETECTION_SENSITIVITY]))
+
+    for key, (setting, options, _) in SETTING_SELECTS.items():
+        if key in config:
+            sel = await select.new_select(config[key], options=options)
+            await cg.register_component(sel, config[key])
+            cg.add(sel.set_parent(var, getattr(Setting, setting)))
+            cg.add(var.add_setting_select(sel))
+    for key, (setting, _) in SETTING_SWITCHES.items():
+        if key in config:
+            sw = await switch.new_switch(config[key])
+            await cg.register_component(sw, config[key])
+            cg.add(sw.set_parent(var, getattr(Setting, setting)))
+            cg.add(var.add_setting_switch(sw))
+
+    cg.add(var.set_replay_stock_init(config["debug_replay_stock_init"]))
+    cg.add(var.set_derive_presence(config["derive_presence"]))
+    cg.add(var.set_absence_timeout(config["absence_timeout"].total_milliseconds))
+    if "debug_force_direction" in config:
+        cg.add(var.set_force_direction(config["debug_force_direction"], config["debug_force_angle"]))
+
+    if CONF_SLEEP in config:
+        sleep_conf = config[CONF_SLEEP]
+        cg.add(var.set_sleep_enabled(True))
+        cg.add(var.set_sleep_mount_position(sleep_conf["mount_position"]))
+        cg.add(var.set_sleep_bed_size(sleep_conf["bed_width"], sleep_conf["bed_length"]))
+        for key, (new, funcName) in SLEEP_SENSOR_MAP.items():
+            if key in sleep_conf:
+                sens = await new(sleep_conf[key])
+                cg.add(getattr(var, funcName)(sens))
 
     if CONF_GLOBAL_ZONE in config:
         global_zone_conf = config[CONF_GLOBAL_ZONE]
@@ -273,7 +411,7 @@ async def to_code(config):
         cg.add(var.set_presence_sensitivity(global_zone_conf[CONF_PRESENCE_SENSITIVITY]))
 
         for key, (new, funcName) in ZONE_SENSOR_MAP.items():
-            if key in global_zone_conf:
+            if key in global_zone_conf and key in (CONF_PRESENCE, CONF_MOTION):
                 sens = await new(global_zone_conf[key])
                 cg.add(getattr(var, funcName)(sens))
 
@@ -292,6 +430,8 @@ async def to_code(config):
     for key, (new, funcName) in SENSOR_MAP.items():
         if key in config:
             sens = await new(config[key])
+            if key == CONF_LOCATION_REPORT_SWITCH:
+                await cg.register_component(sens, config[key])
             cg.add(getattr(var, funcName)(sens))
 
     # Generate map config JSON data at compile time
