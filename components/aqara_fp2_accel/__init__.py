@@ -32,6 +32,14 @@ CONFIG_SCHEMA = cv.Schema(
 
 
 async def to_code(config):
+    # ESPHome >= 2026.9 prunes unused ESP-IDF components; we use the
+    # i2c_master driver directly, so pull it back in.
+    try:
+        from esphome.components.esp32 import include_builtin_idf_component
+        include_builtin_idf_component("esp_driver_i2c")
+    except ImportError:
+        pass
+
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
 

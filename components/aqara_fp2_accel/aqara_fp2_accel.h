@@ -7,7 +7,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
-#include <driver/i2c.h>
+#include <driver/i2c_master.h>
 
 namespace esphome {
 namespace aqara_fp2_accel {
@@ -140,8 +140,11 @@ class AqaraFP2Accel : public Component {
   uint32_t update_interval_ms_{100};
   bool task_running_{false};
 
-  // ESP-IDF I2C configuration
+  // ESP-IDF I2C configuration (new i2c_master driver, IDF >= 5.2 / required by IDF 6)
   i2c_port_t i2c_port_{I2C_NUM_0};
+  i2c_master_bus_handle_t bus_{nullptr};
+  i2c_master_dev_handle_t acc_dev_{nullptr};
+  i2c_master_dev_handle_t lux_dev_{nullptr};
   uint8_t sda_pin_{33};
   uint8_t scl_pin_{32};
   uint32_t frequency_{400000};  // 400kHz

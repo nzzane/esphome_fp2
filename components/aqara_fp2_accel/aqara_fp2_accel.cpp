@@ -10,42 +10,35 @@ bool AqaraFP2Accel::i2c_init_bus() {
   ESP_LOGI(TAG, "Initializing I2C bus on port %d (SDA=%d, SCL=%d, freq=%d Hz)",
            i2c_port_, sda_pin_, scl_pin_, frequency_);
 
-  i2c_config_t conf = {};
-  conf.mode = I2C_MODE_MASTER;
+  i2c_master_bus_config_t conf = {};
+  conf.clk_source = I2C_CLK_SRC_DEFAULT;
+  conf.i2c_port = i2c_port_;
   conf.sda_io_num = static_cast<gpio_num_t>(sda_pin_);
   conf.scl_io_num = static_cast<gpio_num_t>(scl_pin_);
-  conf.sda_pullup_en = GPIO_PULLUP_ENABLE;
-  conf.scl_pullup_en = GPIO_PULLUP_ENABLE;
-  conf.master.clk_speed = frequency_;
+  conf.glitch_ignore_cnt = 7;
+  conf.flags.enable_internal_pullup = true;
 
-  esp_err_t err = i2c_param_config(i2c_port_, &conf);
+  esp_err_t err = i2c_new_master_bus(&conf, &bus_);
   if (err != ESP_OK) {
-    ESP_LOGE(TAG, "I2C param config failed: %s", esp_err_to_name(err));
+    ESP_LOGE(TAG, "I2C bus create failed: %s", esp_err_to_name(err));
     return false;
   }
 
-  err = i2c_driver_install(i2c_port_, I2C_MODE_MASTER, 0, 0, 0);
+  i2c_device_config_t acc_conf = {};
+  acc_conf.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+  acc_conf.device_address = ACC_SENSOR_ADDR;
+  acc_conf.scl_speed_hz = frequency_;
+  err = i2c_master_bus_add_device(bus_, &acc_conf, &acc_dev_);
   if (err != ESP_OK) {
-    ESP_LOGE(TAG, "I2C driver install failed: %s", esp_err_to_name(err));
+    ESP_LOGE(TAG, "I2C add accelerometer failed: %s", esp_err_to_name(err));
     return false;
   }
 
   ESP_LOGI(TAG, "I2C bus initialized successfully");
   i2c_initialized_ = true;
 
-  // One-off bus scan: the FP2 has at least one more I2C device (the ambient
-  // light sensor) on this bus that is not driven yet.  Log what answers.
-  for (uint8_t addr = 0x08; addr < 0x78; addr++) {
-    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (addr << 1) | I2C_MASTER_WRITE, true);
-    i2c_master_stop(cmd);
-    esp_err_t r = i2c_master_cmd_begin(i2c_port_, cmd, pdMS_TO_TICKS(20));
-    i2c_cmd_link_delete(cmd);
-    if (r == ESP_OK) {
-      ESP_LOGI(TAG, "I2C scan: device found at 0x%02X", addr);
-    }
-  }
+  // (No full bus scan with the new driver: probing every address can leave
+  // the bus flagged busy.)  Known devices: accelerometer 0x27, OPT3001 0x44.
   return true;
 }
 
@@ -133,19 +126,30 @@ void AqaraFP2Accel::loop() {
 static const uint8_t LUX_SENSOR_ADDR = 0x44;
 
 bool AqaraFP2Accel::lux_read_reg16_(uint8_t reg, uint16_t *value) {
+  if (lux_dev_ == nullptr) return false;
   uint8_t data[2];
-  esp_err_t err = i2c_master_write_read_device(i2c_port_, LUX_SENSOR_ADDR, &reg, 1, data, 2, pdMS_TO_TICKS(100));
+  esp_err_t err = i2c_master_transmit_receive(lux_dev_, &reg, 1, data, 2, 100);
   if (err != ESP_OK) return false;
   *value = (uint16_t)((data[0] << 8) | data[1]);
   return true;
 }
 
 bool AqaraFP2Accel::lux_write_reg16_(uint8_t reg, uint16_t value) {
+  if (lux_dev_ == nullptr) return false;
   uint8_t buf[3] = {reg, (uint8_t)(value >> 8), (uint8_t)(value & 0xFF)};
-  return i2c_master_write_to_device(i2c_port_, LUX_SENSOR_ADDR, buf, 3, pdMS_TO_TICKS(100)) == ESP_OK;
+  return i2c_master_transmit(lux_dev_, buf, 3, 100) == ESP_OK;
 }
 
 void AqaraFP2Accel::lux_init_() {
+  if (bus_ == nullptr) return;
+  i2c_device_config_t lux_conf = {};
+  lux_conf.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+  lux_conf.device_address = LUX_SENSOR_ADDR;
+  lux_conf.scl_speed_hz = frequency_;
+  if (i2c_master_bus_add_device(bus_, &lux_conf, &lux_dev_) != ESP_OK) {
+    ESP_LOGW(TAG, "I2C add light sensor failed");
+    return;
+  }
   uint16_t mfg = 0, dev = 0;
   if (!lux_read_reg16_(0x7E, &mfg)) {
     ESP_LOGI(TAG, "No light sensor answered at 0x%02X", LUX_SENSOR_ADDR);
@@ -162,13 +166,20 @@ void AqaraFP2Accel::lux_init_() {
     ESP_LOGW(TAG, "Failed to configure OPT3001");
     return;
   }
+  uint16_t cfg = 0;
+  lux_read_reg16_(0x01, &cfg);
+  ESP_LOGI(TAG, "OPT3001 ambient light sensor enabled (config readback 0x%04X)", cfg);
   lux_present_ = true;
-  ESP_LOGI(TAG, "OPT3001 ambient light sensor enabled");
 }
 
 void AqaraFP2Accel::lux_read_() {
   uint16_t raw;
-  if (!lux_read_reg16_(0x00, &raw)) return;
+  if (!lux_read_reg16_(0x00, &raw)) { ESP_LOGW(TAG, "OPT3001 read failed"); return; }
+  static uint8_t n = 0;
+  if ((n++ % 30) == 0) {
+    uint16_t cfg = 0; lux_read_reg16_(0x01, &cfg);
+    ESP_LOGD(TAG, "OPT3001 raw=0x%04X cfg=0x%04X", raw, cfg);
+  }
   // lux = 0.01 * 2^E * R   (E = bits 15..12, R = bits 11..0)
   float lux = 0.01f * (float)(1 << (raw >> 12)) * (float)(raw & 0x0FFF);
   if (mutex_ == nullptr) return;
@@ -224,19 +235,12 @@ bool AqaraFP2Accel::i2c_read_accel_xyz(int16_t *x, int16_t *y, int16_t *z) {
   uint8_t data[6];
   uint8_t reg_addr = 0x02;
 
-  // Use ESP-IDF I2C driver directly for better control
-  esp_err_t err = i2c_master_write_read_device(
-    i2c_port_,
-    ACC_SENSOR_ADDR,
-    &reg_addr,
-    1,
-    data,
-    6,
-    pdMS_TO_TICKS(1000)  // 1 second timeout
-  );
+  esp_err_t err = acc_dev_ == nullptr ? ESP_ERR_INVALID_STATE
+                                      : i2c_master_transmit_receive(acc_dev_, &reg_addr, 1, data, 6, 200);
 
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "Failed to read accelerometer data: %s", esp_err_to_name(err));
+    if (err == ESP_ERR_INVALID_STATE || err == ESP_ERR_TIMEOUT) i2c_master_bus_reset(bus_);
     *x = 0;
     *y = 0;
     *z = 0;
@@ -270,13 +274,8 @@ bool AqaraFP2Accel::i2c_read_accel_xyz(int16_t *x, int16_t *y, int16_t *z) {
 bool AqaraFP2Accel::i2c_write_reg(uint8_t reg, uint8_t value) {
   uint8_t write_buf[2] = {reg, value};
 
-  esp_err_t err = i2c_master_write_to_device(
-    i2c_port_,
-    ACC_SENSOR_ADDR,
-    write_buf,
-    2,
-    pdMS_TO_TICKS(1000)  // 1 second timeout
-  );
+  esp_err_t err = acc_dev_ == nullptr ? ESP_ERR_INVALID_STATE
+                                      : i2c_master_transmit(acc_dev_, write_buf, 2, 1000);
 
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "Failed to write register 0x%02X: %s", reg, esp_err_to_name(err));
