@@ -71,8 +71,12 @@ See [example_config.yaml](example_config.yaml) for a complete working configurat
 | `people_counting` | `true` | Enable people count reports |
 | `fall_detection` | `false` | With `fall_detection_sensitivity` |
 | `derive_presence` | `true` | Derive presence/motion/zone occupancy from targets when the radar sends no events (`absence_timeout`: 30s). Targets in exclude or interference cells are ignored; the radar itself keeps streaming them. |
+| `ignore_exit_targets` | `true` | Also ignore targets standing in `exit_grid` cells (doorways) when deriving presence – the radar keeps a target there while a door swings or someone passes outside |
+| `require_active_target` | `true` | Only count targets the radar still flags active; a dropped track keeps being sent with `active=0` until it ages out and would otherwise count as a second person |
 | `presence_event`, `people_count` | – | Text / numeric sensors (`people_count` counts valid targets when `derive_presence` is on; the radar's own count includes ghosts in excluded / off-grid cells) |
 | `zones[].presence_sensitivity` | `medium` | Per-zone sensitivity |
+| `zones[].zone_type` | `0x0a` | Radar zone type (attribute `0x0152`); the stock app writes `0x0a` for the first zone and `0x24` for the second. A zone without a type is never reported by the radar |
+| `zones[].close_away` | `true` | Close/away reporting for the zone (attribute `0x0153`) |
 | `zones[].event` | – | Text sensor: `enter` / `move` / `exit` |
 | `*_select`, `*_switch` | – | HA entities for each setting, e.g. `mounting_position_select`, `sensitivity_select`, `ai_person_detection_switch` (see example) |
 | `sleep` | – | Experimental sleep monitoring: `enabled` (default off), bed size, raw `presence`/`state`/`in_out`/`event`/`data` sensors |

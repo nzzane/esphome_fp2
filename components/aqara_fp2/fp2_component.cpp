@@ -8,10 +8,14 @@
 #include <vector>
 #include <span>
 #include <cmath>
+#include <algorithm>
 #include "esphome/core/entity_base.h"
 
 namespace esphome {
 namespace aqara_fp2 {
+
+// The radar tracks at most 8 simultaneous targets.
+static const uint8_t MAX_TARGETS = 8;
 
 // CRC16-MODBUS
 static uint16_t crc16(const uint8_t *data, size_t len) {
@@ -117,6 +121,9 @@ void FP2Component::restart_initialization_(const char *reason) {
   waiting_for_ack_attr_id_ = AttrId::INVALID;
   init_done_ = false;
   last_heartbeat_millis_ = 0;
+  // Re-learn which zones the radar reports itself after it comes back.
+  radar_zone_seen_ = false;
+  for (auto *zone : zones_) zone->radar_seen = false;
   perform_reset_();
 }
 
@@ -214,15 +221,23 @@ void FP2Component::check_initialization_() {
     }
     send_zone_activation_list_();
     for (const auto &zone : zones_) {
-      // Zone type (0x0152): stock writes one per zone; 0x0a = "Others"
-      enqueue_command_(OpCode::WRITE, AttrId::DETECT_ZONE_TYPE, (uint16_t)((zone->id << 8) | 0x0a));
-      enqueue_command_(OpCode::WRITE, AttrId::ZONE_CLOSE_AWAY_ENABLE, (uint16_t)((zone->id << 8) | 1));
+      send_zone_type_(zone);
     }
 
     // Sleep monitoring is a radar MODE: while enabled the radar stops normal
     // presence/target reporting, and it remembers the setting across resets.
     // Always write it explicitly so a stale TRUE cannot linger.
     enqueue_command_(OpCode::WRITE, AttrId::SLEEP_REPORT_ENABLE, sleep_enabled_);
+
+    // Location (target) reporting is also remembered by the radar across
+    // resets, and a radar reset has been seen to clear it - which silently
+    // kills every target frame.  Write it explicitly on every init instead of
+    // relying on the stored value.
+    {
+      bool want_targets = location_report_switch_ == nullptr || location_report_switch_->state;
+      location_reporting_active_ = want_targets;
+      enqueue_command_(OpCode::WRITE, AttrId::LOCATION_REPORT_ENABLE, (bool) want_targets);
+    }
 
     // enqueue_read_((AttrId) 0x302); // Read radar flash ID attribute
     // enqueue_read_((AttrId) 0x303); // Read radar ID attribute
@@ -274,10 +289,6 @@ void FP2Component::check_initialization_() {
       target_tracking_sensor_->set_has_state(false);
     }
 
-    // Re-apply the (possibly restored) location reporting switch
-    if (location_report_switch_ != nullptr && location_report_switch_->state) {
-      set_location_reporting_enabled(true);
-    }
 
     publish_settings_();
   }
@@ -848,6 +859,7 @@ void FP2Component::handle_report_(AttrId attr_id, const std::vector<uint8_t> &pa
       ESP_LOGD(TAG, "Zone Presence Report: Zone %d = %s", zone_id, state ? "ON" : "OFF");
       for (auto &z : zones_) {
         if (z->id == zone_id) {
+          z->radar_seen = true;
           z->publish_presence(state == 1);
           if (state == 0) z->publish_motion(false);
           break;
@@ -934,7 +946,15 @@ void FP2Component::handle_location_tracking_report_(const std::vector<uint8_t> &
     return;
   }
 
+  // The count byte is not always trustworthy (186 has been seen on a frame
+  // carrying a single record), so clamp it to what the payload actually holds
+  // and to the radar's own 8-target limit before anything downstream uses it.
   uint8_t count = payload[5];
+  uint8_t available = (uint8_t) std::min<size_t>(255, (payload.size() - 6) / 14);
+  if (count > available || count > MAX_TARGETS) {
+    ESP_LOGW(TAG, "Target count %u out of range (%u in payload); clamping", count, available);
+    count = std::min<uint8_t>(available, MAX_TARGETS);
+  }
 
   // Build binary buffer: [count][target1 14 bytes][target2 14 bytes]...
   // Each target is 14 bytes: id(1), x(2), y(2), z(2), velocity(2), snr(2), classifier(1), posture(1), active(1)
@@ -943,9 +963,6 @@ void FP2Component::handle_location_tracking_report_(const std::vector<uint8_t> &
 
   for (int i = 0; i < count; i++) {
     int offset = 6 + (i * 14);
-    if (offset + 14 > payload.size())
-      break;
-
     // Copy raw 14-byte target data directly (already in correct big-endian format)
     binary_data.insert(binary_data.end(),
                        payload.begin() + offset,
@@ -991,24 +1008,18 @@ bool FP2Component::target_ignored_(int16_t x, int16_t y) const {
   if (!target_cell_(x, y, col, row)) return true;  // outside the grid
   if (has_edge_grid_ && grid_has_(edge_grid_, col, row)) return true;
   if (has_interference_grid_ && grid_has_(interference_grid_, col, row)) return true;
+  // Entry/exit cells are doorways: the radar keeps a target there while a door
+  // swings or someone passes outside, so they were counted as residents.
+  if (ignore_exit_targets_ && has_exit_grid_ && grid_has_(exit_grid_, col, row)) return true;
   return false;
 }
 
 bool FP2Component::zone_contains_(const FP2Zone *zone, int16_t x, int16_t y) const {
+  // Same cell maths as the maps, so a zone and the edge/exit maps can never
+  // disagree about which cell a target is standing in.
   int col, row;
-  if (mounting_position_ == 0x02 || mounting_position_ == 0x03) {
-    // corner: 14x14 view at columns 2-15, +X = left
-    col = 2 + (int) ((-(float) x + 400.0f) / 800.0f * 14.0f);
-    row = (int) ((float) y / 800.0f * 14.0f);
-  } else {
-    // wall: full 16x20 grid, sensor at column 8 / row 0, 50 cm cells of 20
-    // units (2.5 cm per unit, measured), +X = left
-    col = 8 - (int) floorf((float) x / 20.0f) - 1;
-    row = (int) ((float) y / 20.0f);
-  }
-  if (col < 0 || col > 15 || row < 0 || row > 19) return false;
-  uint16_t bits = (zone->grid[row * 2] << 8) | zone->grid[row * 2 + 1];
-  return (bits >> (15 - col)) & 1;
+  if (!target_cell_(x, y, col, row)) return false;
+  return grid_has_(zone->grid, col, row);
 }
 
 void FP2Component::update_derived_states_(const std::vector<uint8_t> &payload, uint8_t count) {
@@ -1017,17 +1028,46 @@ void FP2Component::update_derived_states_(const std::vector<uint8_t> &payload, u
   bool moving = false;
   int valid = 0;
   std::vector<bool> zone_hit(zones_.size(), false);
+  std::vector<bool> zone_moving(zones_.size(), false);
   for (int i = 0; i < count; i++) {
     int off = 6 + i * 14;
     if (off + 14 > (int) payload.size()) break;
+    uint8_t tid = payload[off];
     int16_t x = (int16_t)((payload[off + 1] << 8) | payload[off + 2]);
     int16_t y = (int16_t)((payload[off + 3] << 8) | payload[off + 4]);
     int16_t v = (int16_t)((payload[off + 7] << 8) | payload[off + 8]);
-    if (target_ignored_(x, y)) continue;
+    int16_t snr = (int16_t)((payload[off + 9] << 8) | payload[off + 10]);
+    uint8_t classifier = payload[off + 11];
+    uint8_t posture = payload[off + 12];
+    uint8_t active = payload[off + 13];
+    int col = -1, row = -1;
+    target_cell_(x, y, col, row);
+    // Target frames arrive several times a second, so the full record only goes
+    // out at VERBOSE; a dropped target is logged at DEBUG (rate limited) since
+    // that is what explains a missing person.
+    ESP_LOGV(TAG, "Target %u: x=%d y=%d cell=%d,%d vel=%d snr=%d class=%u posture=%u active=%u",
+             tid, x, y, col, row, v, snr, classifier, posture, active);
+    // A dropped track keeps being sent with active=0 until the radar ages it
+    // out; counting those is what produced a second "person" in an empty room.
+    bool drop_inactive = require_active_target_ && active == 0;
+    if (drop_inactive || target_ignored_(x, y)) {
+      if (now - last_drop_log_ms_ > 5000) {
+        last_drop_log_ms_ = now;
+        ESP_LOGD(TAG, "Target %u ignored (%s): x=%d y=%d cell=%d,%d snr=%d posture=%u",
+                 tid, drop_inactive ? "inactive" : "map", x, y, col, row, snr, posture);
+      }
+      continue;
+    }
     valid++;
-    if (v > motion_velocity_threshold_ || v < -motion_velocity_threshold_) moving = true;
-    for (size_t z = 0; z < zones_.size(); z++)
-      if (!zone_hit[z] && !zones_[z]->is_empty() && zone_contains_(zones_[z], x, y)) zone_hit[z] = true;
+    bool target_moving = v > motion_velocity_threshold_ || v < -motion_velocity_threshold_;
+    if (target_moving) moving = true;
+    for (size_t z = 0; z < zones_.size(); z++) {
+      if (zones_[z]->is_empty() || !zone_contains_(zones_[z], x, y)) continue;
+      zone_hit[z] = true;
+      // A zone is moving only if a target inside *it* is moving, not because
+      // someone is walking somewhere else in the room.
+      if (target_moving) zone_moving[z] = true;
+    }
   }
   if (people_count_sensor_ != nullptr && (!people_count_sensor_->has_state() || (int) people_count_sensor_->state != valid))
     people_count_sensor_->publish_state(valid);
@@ -1040,16 +1080,17 @@ void FP2Component::update_derived_states_(const std::vector<uint8_t> &payload, u
         global_motion_sensor_->publish_state(moving);
     }
   }
-  if (!radar_zone_seen_) {
-    for (size_t z = 0; z < zones_.size(); z++) {
-      auto *zone = zones_[z];
-      if (zone_hit[z]) {
-        zone_last_seen_ms_[z] = now;
-        if (zone->presence_sensor != nullptr && (!zone->presence_sensor->has_state() || !zone->presence_sensor->state))
-          zone->publish_presence(true);
-        if (zone->motion_sensor != nullptr && (!zone->motion_sensor->has_state() || zone->motion_sensor->state != moving))
-          zone->publish_motion(moving);
-      }
+  for (size_t z = 0; z < zones_.size(); z++) {
+    auto *zone = zones_[z];
+    // Zones the radar reports itself keep the radar's answer; the rest (a zone
+    // painted from the card that the radar has not reported yet) are derived.
+    if (zone->radar_seen) continue;
+    if (zone_hit[z]) {
+      zone_last_seen_ms_[z] = now;
+      if (zone->presence_sensor != nullptr && (!zone->presence_sensor->has_state() || !zone->presence_sensor->state))
+        zone->publish_presence(true);
+      if (zone->motion_sensor != nullptr && (!zone->motion_sensor->has_state() || zone->motion_sensor->state != zone_moving[z]))
+        zone->publish_motion(zone_moving[z]);
     }
   }
 }
@@ -1062,13 +1103,12 @@ void FP2Component::check_derived_absence_() {
     if (global_motion_sensor_ != nullptr && global_motion_sensor_->state) global_motion_sensor_->publish_state(false);
     if (people_count_sensor_ != nullptr && people_count_sensor_->state != 0) people_count_sensor_->publish_state(0);
   }
-  if (!radar_zone_seen_) {
-    for (size_t z = 0; z < zones_.size() && z < zone_last_seen_ms_.size(); z++) {
-      auto *zone = zones_[z];
-      if (zone_last_seen_ms_[z] != 0 && now - zone_last_seen_ms_[z] > absence_timeout_ms_) {
-        if (zone->presence_sensor != nullptr && zone->presence_sensor->state) zone->publish_presence(false);
-        if (zone->motion_sensor != nullptr && zone->motion_sensor->state) zone->publish_motion(false);
-      }
+  for (size_t z = 0; z < zones_.size() && z < zone_last_seen_ms_.size(); z++) {
+    auto *zone = zones_[z];
+    if (zone->radar_seen) continue;
+    if (zone_last_seen_ms_[z] != 0 && now - zone_last_seen_ms_[z] > absence_timeout_ms_) {
+      if (zone->presence_sensor != nullptr && zone->presence_sensor->state) zone->publish_presence(false);
+      if (zone->motion_sensor != nullptr && zone->motion_sensor->state) zone->publish_motion(false);
     }
   }
 }
@@ -1282,12 +1322,29 @@ void FP2Component::send_zone_to_radar_(FP2Zone *zone) {
 }
 
 void FP2Component::send_zone_activation_list_() {
+  // 0x0202: 32-byte packed list of active zone ids.  The stock trace with two
+  // zones sends 00 01 02 00 ... - slot 0 is the global zone, then every drawn
+  // zone id in order with no gaps.  Writing the ids at their own index instead
+  // leaves a hole whenever a lower-numbered zone is undrawn (e.g. only zone 2
+  // painted from the card), and the radar then never reports that zone.
   std::vector<uint8_t> activations(32, 0);
+  size_t slot = 1;
   for (const auto &zone : zones_) {
-    if (!zone->is_empty() && zone->id < activations.size())
-      activations[zone->id] = zone->id;
+    if (zone->is_empty() || slot >= activations.size()) continue;
+    activations[slot++] = zone->id;
   }
   enqueue_command_blob2_(AttrId::ZONE_ACTIVATION_LIST, activations);
+}
+
+void FP2Component::send_zone_type_(FP2Zone *zone) {
+  // 0x0152 Hi=ZoneID Lo=type, 0x0153 Hi=ZoneID Lo=close/away enable.  Stock
+  // writes both per zone right after the activation list, and a zone the radar
+  // has no type for is never reported - which is why a zone painted from the
+  // card at runtime stayed dark until the next boot.
+  enqueue_command_(OpCode::WRITE, AttrId::DETECT_ZONE_TYPE,
+                   (uint16_t)((zone->id << 8) | zone->zone_type));
+  enqueue_command_(OpCode::WRITE, AttrId::ZONE_CLOSE_AWAY_ENABLE,
+                   (uint16_t)((zone->id << 8) | (zone->close_away ? 1 : 0)));
 }
 
 void FP2Component::publish_zone_map_(FP2Zone *zone) {
@@ -1445,6 +1502,7 @@ bool FP2Component::set_zone_config(int zone_id, const std::string &grid_hex, int
     if (init_done_) {
       send_zone_to_radar_(zone);
       send_zone_activation_list_();
+      send_zone_type_(zone);
     }
     publish_zone_map_(zone);
     // A cleared zone can't be occupied
@@ -1469,6 +1527,7 @@ bool FP2Component::reset_zone_config(int zone_id) {
     if (init_done_) {
       send_zone_to_radar_(zone);
       send_zone_activation_list_();
+      send_zone_type_(zone);
     }
     publish_zone_map_(zone);
     return true;

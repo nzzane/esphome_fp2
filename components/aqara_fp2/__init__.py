@@ -136,11 +136,14 @@ SLEEP_SCHEMA = cv.Schema(
 
 def parse_ascii_grid(value):
     """
-    Parses a 14x14 ASCII grid into a 40-byte (320-bit) protocol blob.
+    Parses an ASCII grid into a 40-byte (320-bit) protocol blob.
     An empty string yields an empty (disabled) zone that can be drawn later
     from the Home Assistant card.
     Protocol Grid: 20 rows x 16 cols.
-    Active Area: Centered 14x14 (Rows 3-16, Cols 1-14).
+    A 14-row grid is the corner-mount view and is placed at rows 0-13,
+    columns 2-15 - the same window the card draws for corner mounts. In wall
+    mode use the full 20-row grid, otherwise the two left-hand columns are
+    unreachable and the zone sits two cells right of where it is written.
 
     Chars: 'x', 'X' = Active. '.', ' ' = Inactive.
     """
@@ -229,6 +232,11 @@ ZONE_SCHEMA = (
         {
             cv.GenerateID(CONF_ID): cv.declare_id(FP2Zone),
             cv.Optional(CONF_GRID, default=""): parse_ascii_grid,
+            # 0x0152 zone type. The stock app writes one per zone; the captured
+            # trace uses 0x0a for the first zone and 0x24 for the second.
+            cv.Optional("zone_type", default=0x0A): cv.int_range(min=0, max=255),
+            # 0x0153 close/away reporting for this zone
+            cv.Optional("close_away", default=True): cv.boolean,
             cv.Optional("zone_map_sensor"): text_sensor_.text_sensor_schema(entity_category=ENTITY_CATEGORY_DIAGNOSTIC),
             cv.Optional(CONF_EVENT): text_sensor_.text_sensor_schema(icon="mdi:motion-sensor"),
         }
@@ -281,6 +289,10 @@ CONFIG_SCHEMA = (
             # Derive presence/motion/zone occupancy from the target stream when
             # the radar does not report them (FW 99 in wall mode).
             cv.Optional("derive_presence", default=True): cv.boolean,
+            # Ignore targets standing in the entry/exit map (doorways)
+            cv.Optional("ignore_exit_targets", default=True): cv.boolean,
+            # Only count targets the radar still flags active
+            cv.Optional("require_active_target", default=True): cv.boolean,
             cv.Optional("absence_timeout", default="30s"): cv.positive_time_period_milliseconds,
 
             cv.Optional("edge_label_grid_sensor"): text_sensor_.text_sensor_schema(entity_category=ENTITY_CATEGORY_DIAGNOSTIC),
@@ -351,6 +363,8 @@ async def to_code(config):
                 zone_conf[CONF_PRESENCE_SENSITIVITY],
             )
             await cg.register_component(var, zone_conf)
+            cg.add(var.set_zone_type(zone_conf["zone_type"]))
+            cg.add(var.set_close_away(zone_conf["close_away"]))
 
             # Create sensors if provided
             for key, (new, funcName) in ZONE_SENSOR_MAP.items():
@@ -392,6 +406,8 @@ async def to_code(config):
 
     cg.add(var.set_replay_stock_init(config["debug_replay_stock_init"]))
     cg.add(var.set_derive_presence(config["derive_presence"]))
+    cg.add(var.set_ignore_exit_targets(config["ignore_exit_targets"]))
+    cg.add(var.set_require_active_target(config["require_active_target"]))
     cg.add(var.set_absence_timeout(config["absence_timeout"].total_milliseconds))
     if "debug_force_direction" in config:
         cg.add(var.set_force_direction(config["debug_force_direction"], config["debug_force_angle"]))
@@ -460,6 +476,7 @@ async def to_code(config):
             zone_data = {
                 "sensitivity": zone_conf[CONF_PRESENCE_SENSITIVITY],
                 "grid": grid_to_hex_string(zone_conf[CONF_GRID]),
+                "zone_type": zone_conf["zone_type"],
             }
             zones_data.append(zone_data)
         map_config_data["zones"] = zones_data

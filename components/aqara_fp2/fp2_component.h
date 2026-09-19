@@ -43,6 +43,9 @@ struct FP2Zone : public Component {
     this->motion_sensor = sensor;
   }
 
+  void set_zone_type(uint8_t t) { this->zone_type = t; }
+  void set_close_away(bool v) { this->close_away = v; }
+
   void set_map_sensor(text_sensor::TextSensor *sensor) {
     this->map_sensor = sensor;
   }
@@ -85,6 +88,16 @@ struct FP2Zone : public Component {
   GridMap yaml_grid;
   uint8_t yaml_sensitivity;
   bool runtime_override{false};
+  // 0x0152 detect zone type.  The stock app writes one per zone (0x0a =
+  // "Others", 0x24 = the type it uses for the second zone in the captured
+  // trace); the radar only reports zones whose type it knows.
+  uint8_t zone_type{0x0a};
+  // 0x0153 close/away reporting for this zone
+  bool close_away{true};
+  // The radar reports this zone natively (ZONE_PRESENCE); until it does the
+  // derived target logic owns the zone instead.  Per zone, because the radar
+  // reports some zones and not others.
+  bool radar_seen{false};
 };
 
 // Runtime zone overrides persisted in flash (one slot per YAML zone, by index)
@@ -280,6 +293,8 @@ public:
   }
   void set_fall_detection(bool val) { fall_detection_ = val; }
   void set_derive_presence(bool v) { derive_presence_ = v; }
+  void set_ignore_exit_targets(bool v) { ignore_exit_targets_ = v; }
+  void set_require_active_target(bool v) { require_active_target_ = v; }
   void set_absence_timeout(uint32_t ms) { absence_timeout_ms_ = ms; }
   // Debug: report a fixed orientation/angle to the radar instead of the accelerometer's
   void set_force_direction(int dir, int angle) { force_direction_ = dir; force_angle_ = angle; }
@@ -438,6 +453,7 @@ protected:
   void save_zone_overrides_();
   void send_zone_to_radar_(FP2Zone *zone);
   void send_zone_activation_list_();
+  void send_zone_type_(FP2Zone *zone);
   void publish_zone_map_(FP2Zone *zone);
   ESPPreferenceObject zone_pref_;
   void restart_initialization_(const char *reason);
@@ -488,9 +504,15 @@ protected:
   // (at least in wall mode), so presence/motion/zone occupancy are derived from
   // the target stream unless the radar reports them itself.
   bool derive_presence_{true};
+  // Drop targets standing in the entry/exit map (doorways) from derived
+  // presence, the same way the edge and interference maps are applied.
+  bool ignore_exit_targets_{true};
+  // Only count targets the radar still flags active (last byte of the record).
+  bool require_active_target_{true};
   uint32_t absence_timeout_ms_{30000};
   int16_t motion_velocity_threshold_{15};
   uint32_t last_target_seen_ms_{0};
+  uint32_t last_drop_log_ms_{0};
   bool derived_presence_state_{false};
   bool radar_presence_seen_{false};
   bool radar_zone_seen_{false};
